@@ -86,6 +86,26 @@ template — you would have to re-port the whole DR + obs-noise + NaN-guard stac
   microduck `*_penalty` / `*_l1` functions self-negate (≤ 0) and take POSITIVE
   weights. Verify on every run: every `Episode_Reward/<penalty>` must be ≤ 0.
 
+- **THE STAND-STILL TRAP — expect this to bite harder here than it did for
+  walking.** Added 2026-08-30 after measuring it on the straight-leg policy (see
+  `low-speed-dead-zone.md`). `track_linear_velocity` is
+  `exp(-error² / std²)` with `std² = 0.1`, so standing still against a commanded
+  0.1 m/s scores `exp(-0.01/0.1)` = **0.905 — 90.5% of maximum tracking reward
+  for doing nothing.** The straight-leg policy consequently refuses to move at
+  all below ~0.3 m/s.
+
+  A hop policy is *more* exposed to this, not less: hopping costs far more
+  action-rate, torque and impact penalty than walking does, so the reward
+  margin that must justify moving is larger, while the tracking payoff for
+  standing still is identical. If you inherit the velocity recipe's tracking std
+  unchanged, the most likely failure mode of this whole task is a robot that
+  stands perfectly still and collects 90% of the tracking reward.
+
+  Decide the tracking std deliberately before the first real run, and
+  **sweep commanded speed from 0.1 to max** in evaluation — do not evaluate only
+  at mid-range. The straight-leg audit measured 83%/100% tracking at 0.3-0.4 m/s
+  and looked healthy for hours before a low-speed sweep exposed the dead zone.
+
 ## Things that differ from the straight-leg task
 
 - **Symmetry mirror-loss can be ENABLED here.** Hopping is bilaterally
@@ -120,11 +140,25 @@ MUJOCO_GL=egl uv run scripts/infer_policy.py --walking /tmp/hop.onnx --new-cmd-o
   --lin-vel-x 0.3 --video /tmp/hop.mp4 --duration 15 --fast
 ```
 
-Two flags that cost real time to rediscover:
+Three tooling facts that cost real time to rediscover:
+
 - `--new-cmd-obs` is **mandatory** for 61D policies. Without it `infer_policy.py`
   silently builds a 51D observation and renders convincing nonsense.
 - Pass `--lin-vel-x` etc. explicitly, or the rollout runs at zero command and you
   will be watching the robot stand still.
+- **The headless viewer's camera TRACKS `trunk_base` at `distance = 1.0`**
+  (`HeadlessViewer.__init__`, `track_body="trunk_base"`). For a walking policy
+  this merely hides translation. **For a hop it is much worse: a body-tracking
+  camera cancels the vertical motion too, so a robot that is hopping correctly
+  will look like it is standing still.** Do not judge hop height from these
+  videos. Either add a fixed-camera / `--no-track` option first, or measure
+  apex height from `trunk_z` telemetry and contact data. A healthy 0.302 m/s
+  walking rollout was reported as "not moving" on 2026-08-30 for exactly this
+  reason.
+
+`--save-csv` **exists and works** — confirmed 2026-08-30, it dumps 77 columns ×
+600 rows (joint positions among them) for a 12 s rollout. Use it for the flight-
+phase and contact analysis rather than writing a bespoke rollout script.
 
 ## Free performance (measured 2026-08-30, applies to any flat env)
 
@@ -140,6 +174,23 @@ excluded from the straight-leg version for the same reason.
 
 Also measured and NOT worth taking: `jacobian dense/sparse` (−1%/−8%),
 `cone elliptic` (−12%), `ccd-iterations 12` (±0%).
+
+## Curricula and resume (learned the hard way, 2026-08-30)
+
+Curriculum stage `step` numbers are **ABSOLUTE env steps, and they survive a
+resume**: mjlab's runner (`mjlab/rl/runner.py`, "Restore common_step_counter to
+preserve curricula state") saves the counter into the checkpoint and restores
+it. `ManagerBasedRlEnv.__init__` does set it to 0, but the runner overwrites
+that — reading only the env gives the wrong answer.
+
+Consequence to design around: resuming from a checkpoint **past** a stage
+boundary makes that stage fire instantly rather than ramp. A speed ramp
+designed as 0.4 → 0.5 → 0.6 collapsed into an immediate jump to 0.6 this way.
+If you resume a hop run and expect a gradual introduction of anything, place the
+stages past the resume point.
+
+See also `adaptive-speed-curriculum.md` — a performance-gated curriculum would
+sidestep this entirely, and would suit hop-height/speed ramps well.
 
 ## Acceptance criteria
 
