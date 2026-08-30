@@ -77,12 +77,56 @@ GATE_STD = 0.20
 # self-negating microduck penalty (returns ≤ 0) → POSITIVE weight; joint_vel_l2
 # is an mjlab-base cost (returns ≥ 0) → NEGATIVE weight. Both must log
 # Episode_Reward ≤ 0.
-LOCK_WEIGHT = 2.0
-L1_WEIGHT_STAGES = (3.0, 6.0, 9.0)  # iters 0 / 500 / 1000
+#
+# Run-1 audit (checkpoint 1250/1750, 8192 envs) drove the values below:
+#   - The constraint WORKS: left knee held 0.44° mean / 2.34° max error while
+#     the right knee (control) swept 38° peak-to-peak — ~10x separation. The
+#     gate ratio reached 0.996 and the robot walked at 83% of commanded 0.4 m/s
+#     on foot contacts only, with near-symmetric foot lift (15.1 vs 16.1 mm).
+#   - So the lock was OVER-PAID: straight_leg_lock took 20% of the positive
+#     reward mass with only 0.129 headroom left, buying a constraint already
+#     satisfied 10x over. Halved 2.0 → 1.0 and the mass moved to tracking.
+LOCK_WEIGHT = 1.0  # was 2.0 — see audit note above
+# Run-1 dropped the third L1 stage (6→9 at iter 1000): it improved knee error
+# by only 4% (0.63° → 0.60°) while air_time fell 9% and peak foot height 10%,
+# NEITHER recovering over the following 380 iterations — AGENTS.md's "steps
+# DOWN at a curriculum boundary means the pacing is wrong" signal. Caveat: the
+# action_rate ramp stepped at the same iteration so attribution is not clean,
+# but the identical action_rate step at iter 750 caused only a transient.
+L1_WEIGHT_STAGES = (3.0, 6.0)  # was (3.0, 6.0, 9.0)
 KNEE_VEL_WEIGHT = -0.02
-GATED_TRACK_WEIGHT = 1.0
-# The base tracking term keeps the remaining mass (velocity env ships 2.0).
-UNGATED_TRACK_WEIGHT = 1.0
+# Tracking mass raised 2.0 → 3.0 total. The audit found velocity tracking, not
+# straightness, is the weak axis: forward reached 83% of command, backward 58%,
+# lateral only 24%, and error_vel_xy was improving just 6% per 400 iters. This
+# is where the reward mass freed from LOCK_WEIGHT goes.
+GATED_TRACK_WEIGHT = 1.5
+UNGATED_TRACK_WEIGHT = 1.5
+
+# ── Speed push ────────────────────────────────────────────────────────────────
+# "Go as fast as possible", implemented WITHOUT breaking the velocity-command
+# contract: this stays a tracking task (the runtime steers the robot by sending
+# a twist command, so a policy that always sprints would be undeployable).
+# Speed is pushed by raising the forward command CEILING on a curriculum, plus
+# the tracking-mass increase above.
+#
+# Staged LATE and deliberately: the audit measured the robot reaching only 83%
+# of its CURRENT 0.4 m/s ceiling, so raising the ceiling before it can hit the
+# existing one is exactly the documented failure in the velocity env's header
+# ("a ramp to lin ±0.4 / ang ±2.0 outpaced the robot's capability and tracked a
+# post-iter-1000 reward/episode-length decline").
+#
+# NOTE ON STEP NUMBERS: env.common_step_counter is reset to 0 by
+# ManagerBasedRlEnv.__init__ and is NOT restored from a checkpoint (rsl_rl only
+# restores current_learning_iteration). So on --agent.resume every curriculum
+# replays from stage 0, and these steps count from the RESUMED run's start.
+SPEED_CMD_STAGES = (
+    (0, 0.4),      # unchanged ceiling while the policy re-settles after resume
+    (800, 0.5),
+    (1600, 0.6),
+)
+# Only lin_vel_x widens. lin_vel_y is left at its ±0.3 (lateral is the WEAKEST
+# axis at 24% of command — widening it would add error, not speed) and
+# ang_vel_z at ±1.0 (yaw already tracks at 107%, it needs no help).
 
 # Pose-reward std for the locked knee. The velocity recipe uses 0.15 (standing)
 # / 0.4 (walking) for BOTH knees; leaving that in place would let the pose
@@ -172,10 +216,46 @@ def make_microduck_velocity_straightleg_env_cfg(
             "weight_stages": [
                 {"step": 0, "weight": L1_WEIGHT_STAGES[0]},
                 {"step": 500 * NUM_STEPS_PER_ENV, "weight": L1_WEIGHT_STAGES[1]},
-                {"step": 1000 * NUM_STEPS_PER_ENV, "weight": L1_WEIGHT_STAGES[2]},
             ],
         },
     )
+
+    # Forward-speed ceiling curriculum (see the SPEED_CMD_STAGES block above).
+    # update_lin_vel_y / update_ang_vel_z are False so ONLY lin_vel_x widens —
+    # the helper would otherwise slave lin_vel_y to the same range, which would
+    # widen the weakest-tracking axis.
+    cfg.curriculum["speed_ceiling"] = CurriculumTermCfg(
+        func=microduck_mdp.velocity_command_ranges_curriculum,
+        params={
+            "command_name": "twist",
+            "update_lin_vel_y": False,
+            "update_ang_vel_z": False,
+            "velocity_stages": [
+                {
+                    "step": it * NUM_STEPS_PER_ENV,
+                    "lin_vel_range": v,
+                    "ang_vel_range": 1.0,  # unused (update_ang_vel_z=False)
+                }
+                for it, v in SPEED_CMD_STAGES
+            ],
+        },
+    )
+
+    # ── Measured performance settings (flat only) ─────────────────────────────
+    # njmax caps the constraint-array capacity. mjlab defaults it to 1500 here,
+    # but an instrumented rollout (2048 envs, 400 steps, RANDOM actions so the
+    # robots fall and pile up multi-limb ground contacts — the worst case for
+    # constraint count) measured a peak nefc of just 59. 256 keeps 4.3x headroom
+    # over that peak, so no constraint can ever be dropped: this is a CAPACITY
+    # change, not a physics change. Measured +23.7% throughput on its own.
+    # ls_parallel=False measured a further +9.1% (combined: +30.5%, 37.0k →
+    # 48.3k steps/s at 4096 envs on a GB10). ls_parallel only changes how the
+    # Newton solver's line search is parallelised, not the problem being solved.
+    # Rough terrain is deliberately EXCLUDED: the nefc measurement was taken on
+    # a plane, and box terrain adds contacts, so the headroom is unproven there.
+    if not rough:
+        cfg.sim.njmax = 256
+        cfg.sim.ls_parallel = False
 
     return cfg
 

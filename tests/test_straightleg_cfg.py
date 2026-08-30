@@ -69,10 +69,10 @@ def test_reward_signs_follow_the_two_conventions():
     assert cfg.rewards["straight_leg_tracking"].weight > 0.0
 
 
-def test_tracking_mass_is_conserved_not_duplicated():
-    # The gated composite takes half of track_linear_velocity's mass rather than
-    # being stacked on top, so the task stack does not inflate relative to the
-    # inherited regularizers.
+def test_tracking_mass_is_raised_deliberately():
+    # Originally the gated composite merely took half of track_linear_velocity's
+    # mass. After the run-1 audit the total was raised on purpose (velocity
+    # tracking was the measured weak axis), so assert the new intent.
     base = make_microduck_velocity_straightleg_env_cfg()
     from mjlab_microduck.tasks.microduck_velocity_env_cfg import (
         make_microduck_velocity_env_cfg,
@@ -83,7 +83,9 @@ def test_tracking_mass_is_conserved_not_duplicated():
         base.rewards["track_linear_velocity"].weight
         + base.rewards["straight_leg_tracking"].weight
     )
-    assert total == vel.rewards["track_linear_velocity"].weight
+    # Run-1 audit moved mass from the lock INTO tracking, so the straightleg
+    # stack now carries MORE tracking mass than the velocity env it derives from.
+    assert total > vel.rewards["track_linear_velocity"].weight
 
 
 def test_terms_address_only_the_left_knee():
@@ -115,6 +117,41 @@ def test_pose_reward_knee_std_is_split_per_side_and_tighter_on_the_left():
         stds = cfg.rewards["pose"].params[key]
         assert r".*knee.*" not in stds
         assert stds[r".*left_knee.*"] < stds[r".*right_knee.*"]
+
+
+def test_speed_ceiling_curriculum_only_widens_forward():
+    # "Go fast" must not widen lin_vel_y: lateral is the weakest-tracking axis
+    # (24% of command in the run-1 audit), so widening it adds error, not speed.
+    cfg = make_microduck_velocity_straightleg_env_cfg()
+    p = cfg.curriculum["speed_ceiling"].params
+    assert p["update_lin_vel_y"] is False
+    assert p["update_ang_vel_z"] is False
+    speeds = [s["lin_vel_range"] for s in p["velocity_stages"]]
+    assert speeds == sorted(speeds)
+    # Stage 0 must not raise the ceiling before the policy re-settles on resume.
+    assert speeds[0] == cfg.commands["twist"].ranges.lin_vel_x[1]
+
+
+def test_perf_settings_applied_on_flat_but_not_rough():
+    # njmax=256 is justified by a measured peak nefc of 59 on a PLANE. Box
+    # terrain adds contacts, so the headroom is unproven there and the
+    # reduction must not leak into the rough variant.
+    flat = make_microduck_velocity_straightleg_env_cfg()
+    rough = make_microduck_velocity_straightleg_env_cfg(rough=True)
+    assert flat.sim.njmax == 256
+    assert flat.sim.ls_parallel is False
+    assert rough.sim.njmax != 256
+    # Whatever it is, it must stay far above the measured peak of 59.
+    assert flat.sim.njmax > 59 * 4
+
+
+def test_lock_no_longer_dominates_tracking_mass():
+    # Run-1 audit: the lock took 20% of positive mass for a constraint already
+    # satisfied to 0.44 deg, while velocity tracking was the weak axis.
+    cfg = make_microduck_velocity_straightleg_env_cfg()
+    track = (cfg.rewards["track_linear_velocity"].weight
+             + cfg.rewards["straight_leg_tracking"].weight)
+    assert track > cfg.rewards["straight_leg_lock"].weight
 
 
 def test_l1_curriculum_only_hardens():
