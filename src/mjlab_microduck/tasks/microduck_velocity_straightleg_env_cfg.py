@@ -115,12 +115,20 @@ UNGATED_TRACK_WEIGHT = 1.5
 # ("a ramp to lin ±0.4 / ang ±2.0 outpaced the robot's capability and tracked a
 # post-iter-1000 reward/episode-length decline").
 #
-# NOTE ON STEP NUMBERS: env.common_step_counter is reset to 0 by
-# ManagerBasedRlEnv.__init__ and is NOT restored from a checkpoint (rsl_rl only
-# restores current_learning_iteration). So on --agent.resume every curriculum
-# replays from stage 0, and these steps count from the RESUMED run's start.
+# NOTE ON STEP NUMBERS: these are ABSOLUTE. mjlab's runner (mjlab/rl/runner.py,
+# "Restore common_step_counter to preserve curricula state") saves
+# env.common_step_counter into the checkpoint and restores it on --agent.resume,
+# so curricula pick up exactly where they left off. ManagerBasedRlEnv.__init__
+# does set the counter to 0, but the runner overwrites it — do not be misled by
+# reading only the env.
+#
+# CONSEQUENCE, learned the hard way: run 2 resumed from iteration 1750, which is
+# already past both stages below, so the ceiling jumped 0.4 → 0.6 immediately
+# instead of ramping. It survived that (error_vel_xy still improved ~6%), but
+# any FUTURE stage added here must be placed past the resume point to actually
+# ramp.
 SPEED_CMD_STAGES = (
-    (0, 0.4),      # unchanged ceiling while the policy re-settles after resume
+    (0, 0.4),
     (800, 0.5),
     (1600, 0.6),
 )
