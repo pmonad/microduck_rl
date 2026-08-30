@@ -5,7 +5,7 @@ from dataclasses import dataclass as _dataclass
 
 import numpy as np
 import torch
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Sequence
 import mujoco
 
 from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
@@ -7186,3 +7186,57 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Straight-leg walking (Mjlab-VelocityStraightLeg-*-MicroDuck)
+# ---------------------------------------------------------------------------
+
+# Canonical 14-servo layout index of each knee (see AGENTS.md "Joint layout").
+# HOME_FRAME puts the knees at ∓0.0049 rad, i.e. the HOME pose already IS the
+# straight-leg pose — so "keep the leg straight" == "keep the knee at its
+# default", and every reward below can use default_joint_pos as the target.
+LEFT_KNEE_IDX = 3
+RIGHT_KNEE_IDX = 12
+
+
+def straight_leg_velocity_tracking(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    std: float,
+    straight_std: float = 0.20,
+    joint_indices: Sequence[int] = (LEFT_KNEE_IDX,),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Linear-velocity tracking MULTIPLIED by a leg-straightness factor.
+
+    ``track_linear_velocity``'s Gaussian times a Gaussian on the selected
+    joints' deviation from HOME (= straight, see ``LEFT_KNEE_IDX`` above).
+
+    Why multiplicative (AGENTS.md "multiplicative composites beat additive
+    sums at goal states"): with an additive lock penalty next to an additive
+    tracking reward there is a compromise basin — bend the knee a little, keep
+    most of the tracking mass, pay a small fixed tax. A product collapses on
+    whichever factor is deficient, so commanded speed is only worth having
+    while the leg is locked.
+
+    ``straight_std`` is deliberately WIDER than the standalone lock reward's
+    std: the factor must score visibly for a policy that CURRENTLY bends the
+    knee, otherwise the gradient is invisible and nothing changes. The sharp
+    peak at zero error is supplied by the separate lock/L1 terms.
+
+    ``joint_indices`` index the SERVO view, so this is correct on the backlash
+    and roller models too (where passive_* joints interleave).
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    actual = asset.data.root_link_lin_vel_b
+    xy_error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
+    lin_vel_error = xy_error + torch.square(actual[:, 2])
+    track = torch.exp(-lin_vel_error / std**2)
+
+    idx = list(joint_indices)
+    err = _servo_joint_pos(env, asset)[:, idx] - _servo_default_joint_pos(env, asset)[:, idx]
+    straight = torch.exp(-((err / straight_std) ** 2)).mean(dim=-1)
+    return torch.nan_to_num(track * straight, nan=0.0)

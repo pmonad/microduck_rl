@@ -47,6 +47,10 @@ from .microduck_velocity_swizzle_env_cfg import (
     make_microduck_velocity_swizzle_env_cfg,
     MicroduckSwizzleRlCfg,
 )
+from .microduck_velocity_straightleg_env_cfg import (
+    make_microduck_velocity_straightleg_env_cfg,
+    MicroduckStraightLegRlCfg,
+)
 from .microduck_roller_crouch_env_cfg import (
     make_microduck_roller_crouch_env_cfg,
     MicroduckRollerCrouchRlCfg,
@@ -173,6 +177,23 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 
+# Straight-left-leg walking — the velocity recipe with the left knee locked.
+register_mjlab_task(
+    task_id="Mjlab-VelocityStraightLeg-Flat-MicroDuck",
+    env_cfg=make_microduck_velocity_straightleg_env_cfg(),
+    play_env_cfg=make_microduck_velocity_straightleg_env_cfg(play=True),
+    rl_cfg=MicroduckStraightLegRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-VelocityStraightLeg-Rough-MicroDuck",
+    env_cfg=make_microduck_velocity_straightleg_env_cfg(rough=True),
+    play_env_cfg=make_microduck_velocity_straightleg_env_cfg(play=True, rough=True),
+    rl_cfg=MicroduckStraightLegRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
 # Roller SWIZZLE task — clean classic swizzle (symmetric, feet grounded).
 register_mjlab_task(
     task_id="Mjlab-Velocity-Swizzle-MicroDuck",
@@ -256,6 +277,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-GroundPick-Rough-Backlash-MicroDuck", make_microduck_ground_pick_env_cfg, {"rough": True}, MicroduckGroundPickRlCfg, _BL_ALLCOL),
     ("Mjlab-BallKick-Flat-Backlash-MicroDuck", make_microduck_ball_kick_env_cfg, {}, MicroduckBallKickRlCfg, _BL_ALLCOL),
     ("Mjlab-Velocity-Flat-Backlash-MicroDuck-Rollers", make_microduck_velocity_rollers_env_cfg, {}, MicroduckRollersRlCfg, _BL_ROLLERS),
+    ("Mjlab-VelocityStraightLeg-Flat-Backlash-MicroDuck", make_microduck_velocity_straightleg_env_cfg, {}, MicroduckStraightLegRlCfg, _BL_WALK),
     ("Mjlab-Velocity-Swizzle-Backlash-MicroDuck", make_microduck_velocity_swizzle_env_cfg, {}, MicroduckSwizzleRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerCrouch-Flat-Backlash-MicroDuck", make_microduck_roller_crouch_env_cfg, {}, MicroduckRollerCrouchRlCfg, _BL_ROLLERS),
     ("Mjlab-RollerSlope-Flat-Backlash-MicroDuck", make_microduck_roller_slope_env_cfg, {}, MicroduckRollerSlopeRlCfg, _BL_ROLLERS),
